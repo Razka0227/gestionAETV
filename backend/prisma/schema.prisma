@@ -1,0 +1,579 @@
+// Schéma de base de données — Gestion Achats / Ventes / Stock
+// Conventions :
+//  - Tous les montants (FCFA/unité) et quantités sont des entiers.
+//  - Les stock est dénormalisé dans Produit.stock et mis à jour en transaction
+//    avec chaque MouvementStock (source de vérité = mouvements).
+//  - Le champ "date" utilise UTC. Les bornes de rapports sont calculées en UTC.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Énumérations
+// ---------------------------------------------------------------------------
+
+enum Role {
+  ADMIN
+  GERANT
+  CAISSIER
+  MAGASINIER
+  COMPTABLE
+}
+
+enum StatutVente {
+  BROUILLON
+  VALIDEE
+  ANNULEE
+  RETOURNEE
+}
+
+enum TypeVente {
+  DETAIL
+  GROS
+  PERSONNALISE
+}
+
+enum ModePaiement {
+  ESPECES
+  CARTE
+  VIREMENT
+  MOBILE_MONEY
+  CREDIT_CLIENT
+}
+
+enum StatutCommande {
+  BROUILLON
+  ENVOYEE
+  RECUE
+  PARTIELLEMENT_RECUE
+  ANNULEE
+}
+
+enum TypeMouvementStock {
+  ENTREE_ACHAT
+  SORTIE_VENTE
+  AJUSTEMENT
+  INVENTAIRE
+  RETOUR_VENTE
+  RETOUR_FOURNISSEUR
+  PERTE
+  TRANSFERT
+}
+
+enum SensPaiement {
+  ENTREE
+  SORTIE
+}
+
+enum TypeRetour {
+  VENTE
+  ACHAT
+}
+
+enum StatutRetour {
+  VALIDE
+  ANNULE
+}
+
+enum StatutInventaire {
+  BROUILLON
+  VALIDE
+}
+
+enum StatutCaisse {
+  OUVERTE
+  FERMEE
+}
+
+enum SensMouvementCaisse {
+  ENTREE
+  SORTIE
+}
+
+// ---------------------------------------------------------------------------
+// Boutique / société
+// ---------------------------------------------------------------------------
+
+model Boutique {
+  id          Int    @id @default(autoincrement())
+  nom         String
+  adresse     String?
+  telephone   String?
+  devise      String @default("XOF")
+  createdAt   DateTime @default(now())
+
+  utilisateurs Utilisateur[]
+  ventes        Vente[]
+  commandes     CommandeAchat[]
+  mouvementsStock MouvementStock[]
+  depenses       Depense[]
+  caisseSessions CaisseSession[]
+  inventaires    Inventaire[]
+
+  @@map("boutiques")
+}
+
+// ---------------------------------------------------------------------------
+// Utilisateurs & authentification
+// ---------------------------------------------------------------------------
+
+model Utilisateur {
+  id              Int      @id @default(autoincrement())
+  nom             String
+  email           String   @unique
+  motDePasseHash  String
+  role            Role     @default(CAISSIER)
+  actif           Boolean  @default(true)
+  boutiqueId      Int?
+  boutique        Boutique? @relation(fields: [boutiqueId], references: [id])
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  ventes           Vente[]
+  commandesAchats  CommandeAchat[]
+  mouvementsStock  MouvementStock[]
+  depenses         Depense[]
+  caisseSessions   CaisseSession[]
+  paiements        Paiement[]
+  retours          Retour[]
+  inventaires      Inventaire[]
+  audits           AuditLog[]
+
+  @@map("utilisateurs")
+}
+
+// ---------------------------------------------------------------------------
+// Catalogue
+// ---------------------------------------------------------------------------
+
+model Categorie {
+  id          Int     @id @default(autoincrement())
+  nom         String
+  parentId    Int?
+  parent      Categorie?  @relation("SousCategories", fields: [parentId], references: [id])
+  sousCategories Categorie[] @relation("SousCategories")
+  description String?
+  createdAt   DateTime @default(now())
+
+  produits Produit[]
+
+  @@unique([nom, parentId])
+  @@map("categories")
+}
+
+model Marque {
+  id       Int    @id @default(autoincrement())
+  nom      String @unique
+  createdAt DateTime @default(now())
+
+  produits Produit[]
+
+  @@map("marques")
+}
+
+model Produit {
+  id           Int     @id @default(autoincrement())
+  categorieId  Int
+  categorie    Categorie @relation(fields: [categorieId], references: [id])
+  marqueId     Int?
+  marque       Marque?  @relation(fields: [marqueId], references: [id])
+  reference    String   @unique
+  codeBarre    String?
+  nom          String
+  description  String?
+  image        String?
+  unite        String   @default("pièce")
+  prixAchat    Int      @default(0)
+  prixVente    Int      @default(0)
+  prixGros     Int?
+  prixPromo    Int?
+  stockMin     Int      @default(0)
+  emplacement  String?
+  suitLots     Boolean  @default(false)
+  actif        Boolean  @default(true)
+  stock        Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  variantes     ProduitVariante[]
+  lots          Lot[]
+  venteLignes   VenteLigne[]
+  commandeAchatLignes CommandeAchatLigne[]
+  mouvementsStock     MouvementStock[]
+  inventaireLignes    InventaireLigne[]
+  retourLignes        RetourLigne[]
+
+  @@index([categorieId])
+  @@index([codeBarre])
+  @@map("produits")
+}
+
+model ProduitVariante {
+  id            Int    @id @default(autoincrement())
+  produitId     Int
+  produit       Produit @relation(fields: [produitId], references: [id], onDelete: Cascade)
+  nomOption     String  // ex. "Taille", "Couleur"
+  valeur        String  // ex. "M", "Rouge"
+  prixAjustement Int   @default(0)
+
+  @@map("produit_variantes")
+}
+
+model Lot {
+  id             Int      @id @default(autoincrement())
+  produitId      Int
+  produit        Produit  @relation(fields: [produitId], references: [id], onDelete: Cascade)
+  numero         String
+  datePeremption DateTime?
+  quantite       Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  @@index([produitId, datePeremption])
+  @@map("lots")
+}
+
+// ---------------------------------------------------------------------------
+// Tiers : fournisseurs & clients
+// ---------------------------------------------------------------------------
+
+model Fournisseur {
+  id         Int     @id @default(autoincrement())
+  nom        String
+  entreprise String?
+  contact    String?
+  telephone  String?
+  email      String?
+  adresse    String?
+  actif      Boolean @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  commandes   CommandeAchat[]
+  paiements   Paiement[]
+
+  @@map("fournisseurs")
+}
+
+model Client {
+  id            Int     @id @default(autoincrement())
+  nom           String
+  prenom        String?
+  telephone     String?
+  email         String?
+  adresse       String?
+  pointsFidelite Int    @default(0)
+  actif         Boolean @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  ventes    Vente[]
+  paiements Paiement[]
+
+  @@map("clients")
+}
+
+// ---------------------------------------------------------------------------
+// Achats (bon de commande + réception) & paiements
+// ---------------------------------------------------------------------------
+
+model CommandeAchat {
+  id             Int      @id @default(autoincrement())
+  numero         String   @unique
+  fournisseurId  Int
+  fournisseur    Fournisseur @relation(fields: [fournisseurId], references: [id])
+  boutiqueId     Int?
+  boutique       Boutique? @relation(fields: [boutiqueId], references: [id])
+  date           DateTime @default(now())
+  statut         StatutCommande @default(BROUILLON)
+  totalHt        Int      @default(0)
+  remise         Int      @default(0)
+  fraisTransport Int      @default(0)
+  taxe           Int      @default(0)
+  totalTtc       Int      @default(0)
+  modePaiement   ModePaiement @default(ESPECES)
+  echeance       DateTime?
+  utilisateurId  Int?
+  utilisateur    Utilisateur? @relation(fields: [utilisateurId], references: [id])
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  lignes     CommandeAchatLigne[]
+  paiements  Paiement[]
+  retours    Retour[]
+
+  @@index([fournisseurId, date])
+  @@map("commandes_achats")
+}
+
+model CommandeAchatLigne {
+  id             Int  @id @default(autoincrement())
+  commandeId     Int
+  commande       CommandeAchat @relation(fields: [commandeId], references: [id], onDelete: Cascade)
+  produitId      Int
+  produit        Produit @relation(fields: [produitId], references: [id])
+  quantite       Int
+  prixUnitaire   Int
+  sousTotal      Int
+
+  @@map("commande_achat_lignes")
+}
+
+model Vente {
+  id              Int      @id @default(autoincrement())
+  numeroTicket    String   @unique
+  clientId        Int?
+  client          Client?  @relation(fields: [clientId], references: [id])
+  utilisateurId   Int
+  utilisateur     Utilisateur @relation(fields: [utilisateurId], references: [id])
+  boutiqueId      Int?
+  boutique        Boutique? @relation(fields: [boutiqueId], references: [id])
+  date            DateTime @default(now())
+  typeVente       TypeVente @default(DETAIL)
+  sousTotal       Int      @default(0)
+  remise          Int      @default(0)
+  taxe            Int      @default(0)
+  total           Int      @default(0)
+  modePaiement    ModePaiement @default(ESPECES)
+  statut          StatutVente @default(BROUILLON)
+  montantEncaisse Int      @default(0)
+  montantCredit   Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  lignes    VenteLigne[]
+  paiements Paiement[]
+  retours   Retour[]
+
+  @@index([utilisateurId, date])
+  @@index([clientId])
+  @@map("ventes")
+}
+
+model VenteLigne {
+  id            Int  @id @default(autoincrement())
+  venteId       Int
+  vente         Vente @relation(fields: [venteId], references: [id], onDelete: Cascade)
+  produitId     Int
+  produit       Produit @relation(fields: [produitId], references: [id])
+  varianteDetail String?
+  quantite      Int
+  prixUnitaire  Int
+  coutUnitaire  Int      @default(0)
+  sousTotal     Int
+
+  @@map("vente_lignes")
+}
+
+model Paiement {
+  id             Int      @id @default(autoincrement())
+  sens           SensPaiement
+  montant        Int
+  mode           ModePaiement @default(ESPECES)
+  date           DateTime @default(now())
+  reference      String?
+  utilisateurId  Int?
+  utilisateur    Utilisateur? @relation(fields: [utilisateurId], references: [id])
+  // Cible (une seule renseignée) :
+  venteId          Int?
+  vente            Vente?       @relation(fields: [venteId], references: [id], onDelete: SetNull)
+  clientId         Int?
+  client           Client?      @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  commandeAchatId  Int?
+  commandeAchat    CommandeAchat? @relation(fields: [commandeAchatId], references: [id], onDelete: SetNull)
+  fournisseurId    Int?
+  fournisseur      Fournisseur? @relation(fields: [fournisseurId], references: [id], onDelete: SetNull)
+  depenseId        Int?
+  depense          Depense?     @relation(fields: [depenseId], references: [id], onDelete: SetNull)
+  createdAt        DateTime @default(now())
+
+  @@index([date])
+  @@map("paiements")
+}
+
+// ---------------------------------------------------------------------------
+// Retours
+// ---------------------------------------------------------------------------
+
+model Retour {
+  id              Int      @id @default(autoincrement())
+  numero          String   @unique
+  type            TypeRetour
+  venteId         Int?
+  vente           Vente?   @relation(fields: [venteId], references: [id], onDelete: Cascade)
+  commandeAchatId Int?
+  commandeAchat   CommandeAchat? @relation(fields: [commandeAchatId], references: [id], onDelete: SetNull)
+  date            DateTime @default(now())
+  motif           String
+  montant         Int      @default(0)
+  statut          StatutRetour @default(VALIDE)
+  utilisateurId   Int
+  utilisateur     Utilisateur @relation(fields: [utilisateurId], references: [id])
+
+  lignes RetourLigne[]
+
+  @@index([date])
+  @@map("retours")
+}
+
+model RetourLigne {
+  id           Int  @id @default(autoincrement())
+  retourId     Int
+  retour       Retour @relation(fields: [retourId], references: [id], onDelete: Cascade)
+  produitId    Int
+  produit      Produit @relation(fields: [produitId], references: [id])
+  quantite     Int
+  prixUnitaire Int  @default(0)
+  sousTotal    Int  @default(0)
+
+  @@map("retour_lignes")
+}
+
+// ---------------------------------------------------------------------------
+// Stocks
+// ---------------------------------------------------------------------------
+
+model MouvementStock {
+  id           Int      @id @default(autoincrement())
+  produitId    Int
+  produit      Produit  @relation(fields: [produitId], references: [id])
+  type         TypeMouvementStock
+  quantite     Int      // signée : + entrée, - sortie
+  motif        String?  // obligatoire pour AJUSTEMENT / PERTE / TRANSFERT
+  reference    String?  // n° ticket, n° BA, etc.
+  utilisateurId Int?
+  utilisateur  Utilisateur? @relation(fields: [utilisateurId], references: [id])
+  boutiqueId   Int?
+  boutique     Boutique? @relation(fields: [boutiqueId], references: [id])
+  date         DateTime @default(now())
+
+  @@index([produitId, date])
+  @@index([type])
+  @@map("mouvements_stock")
+}
+
+model Inventaire {
+  id            Int      @id @default(autoincrement())
+  date          DateTime @default(now())
+  statut        StatutInventaire @default(BROUILLON)
+  utilisateurId Int
+  utilisateur   Utilisateur @relation(fields: [utilisateurId], references: [id])
+  boutiqueId    Int?
+  boutique      Boutique? @relation(fields: [boutiqueId], references: [id])
+
+  lignes InventaireLigne[]
+
+  @@map("inventaires")
+}
+
+model InventaireLigne {
+  id             Int @id @default(autoincrement())
+  inventaireId   Int
+  inventaire     Inventaire @relation(fields: [inventaireId], references: [id], onDelete: Cascade)
+  produitId      Int
+  produit        Produit @relation(fields: [produitId], references: [id])
+  qteTheorique   Int
+  qteReelle      Int
+  ecart          Int // qteReelle - qteTheorique
+
+  @@map("inventaire_lignes")
+}
+
+// ---------------------------------------------------------------------------
+// Dépenses & caisse
+// ---------------------------------------------------------------------------
+
+model Depense {
+  id            Int      @id @default(autoincrement())
+  categorieId   Int
+  categorie     DepenseCategorie @relation(fields: [categorieId], references: [id])
+  montant       Int
+  description   String?
+  date          DateTime @default(now())
+  modePaiement  ModePaiement @default(ESPECES)
+  utilisateurId Int?
+  utilisateur   Utilisateur? @relation(fields: [utilisateurId], references: [id])
+  boutiqueId    Int?
+  boutique      Boutique? @relation(fields: [boutiqueId], references: [id])
+
+  paiements Paiement[]
+
+  @@index([categorieId, date])
+  @@map("depenses")
+}
+
+model DepenseCategorie {
+  id       Int    @id @default(autoincrement())
+  nom      String @unique
+  createdAt DateTime @default(now())
+
+  depenses Depense[]
+
+  @@map("depenses_categories")
+}
+
+model CaisseSession {
+  id               Int      @id @default(autoincrement())
+  utilisateurId    Int
+  utilisateur      Utilisateur @relation(fields: [utilisateurId], references: [id])
+  boutiqueId       Int?
+  boutique         Boutique? @relation(fields: [boutiqueId], references: [id])
+  dateOuverture    DateTime @default(now())
+  dateFermeture    DateTime?
+  fondDeCaisse     Int      @default(0)
+  montantTheorique Int      @default(0)
+  montantReel      Int?
+  ecart            Int?
+  statut           StatutCaisse @default(OUVERTE)
+
+  mouvements MouvementCaisse[]
+
+  @@map("caisse_sessions")
+}
+
+model MouvementCaisse {
+  id          Int      @id @default(autoincrement())
+  caisseId    Int
+  caisse      CaisseSession @relation(fields: [caisseId], references: [id], onDelete: Cascade)
+  sens        SensMouvementCaisse
+  montant     Int
+  motif       String?
+  reference   String?
+  date        DateTime @default(now())
+
+  @@map("mouvements_caisse")
+}
+
+// ---------------------------------------------------------------------------
+// Paramètres & audit
+// ---------------------------------------------------------------------------
+
+model Parametre {
+  id          Int    @id @default(autoincrement())
+  cle         String @unique
+  valeur      String
+  description String?
+  updatedAt   DateTime @updatedAt
+
+  @@map("parametres")
+}
+
+model AuditLog {
+  id           Int      @id @default(autoincrement())
+  utilisateurId Int?
+  utilisateur  Utilisateur? @relation(fields: [utilisateurId], references: [id])
+  action       String
+  entite       String
+  entiteId     Int?
+  details      Json?
+  date         DateTime @default(now())
+
+  @@index([entite, entiteId])
+  @@index([date])
+  @@map("journal_audit")
+}

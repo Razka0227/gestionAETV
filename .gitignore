@@ -1,0 +1,26 @@
+# node
+node_modules/
+*.log
+
+# next.js
+.next/
+out/
+tsconfig.tsbuildinfo
+
+# nest.js
+backend/dist/
+
+# env
+.env
+.env.local
+.env.*.local
+
+# prisma
+backend/prisma/migrations/dev.db*
+
+# ide / os
+.idea/
+.DS_Store
+
+# volumes docker (optionnel si sauvegarde locale)
+pgdata/
